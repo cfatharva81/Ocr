@@ -58,7 +58,7 @@ sections:
     scope: {after: "Current Address", before: "1b. Current Employment/Self-Employment and Income"}
   employment_information:
     form_section: section_1
-    scope: {after: "1b. Current Employment/Self-Employment and Income", before: "Gross Monthly Income"}
+    scope: {after: "1b. Current Employment/Self-Employment and Income"}
   income_information:
     form_section: section_1
     scope: {after: "Gross Monthly Income"}
@@ -93,7 +93,7 @@ fields:
     section: borrower_information
     label: "Name (First, Middle, Last, Suffix)"
     strategy: below
-    region: {width: 300, height: 25}
+    region: {width: 250, height: 25}
     type: text
     required: true
   social_security_number:
@@ -119,6 +119,7 @@ fields:
     label: "Alternate Names - List any names by which you are known"
     strategy: below
     region: {width: 300, height: 25}
+    regex: 'Alternate Names.*?\n\s*(No AKAs|[A-Za-z][A-Za-z.-]*(?:\s+[A-Za-z][A-Za-z.-]*){0,4})'
     type: text
   citizenship_status:
     section: borrower_information
@@ -141,17 +142,20 @@ fields:
     phrase_start: false
     region: {width: 40}
     pattern: '\d+'
+    regex: 'Total Number of Borrowers:?\s*(\d+)'
     type: int
   marital_status:
     section: borrower_information
     label: "Marital Status"
+    scope: {before: "Current Address"}
+    band: {height: 12}
     strategy: checkbox_group
     options: ["Married", "Separated", "Unmarried"]
     type: choice
   number_of_dependents:
     section: borrower_information
     label: "Number"
-    scope: {after: "Dependents (not listed by another Borrower)", before: ["Contact Information", "Home Phone"]}
+    scope: {after: "Dependents", before: "Current Address"}
     strategy: right
     region: {width: 30}
     pattern: '\d+'
@@ -184,8 +188,8 @@ fields:
     label: "Email"
     strategy: right
     region: {width: 260}
-    pattern: '[\w.%+\-]+\s*@\s*[\w.\-]+\.\w{2,}'
-    regex: '([\w.%+\-]+@[\w.\-]+\.\w{2,})'
+    pattern: '(?i:email)\s*([\w.%+\-]+\s*@\s*[\w.\-]+\.\w{2,})'
+    regex: '(?i:email)\s*([\w.%+\-]+@[\w.\-]+\.\w{2,})'
     type: email
 
   # --------------------------------------------------------------- address
@@ -284,7 +288,7 @@ fields:
     type: text
   employment_start_date:
     section: employment_information
-    label: "Start Date (mm/dd/yyyy)"
+    label: ["Start Date (mm/dd/yyyy)", "Start Date"]
     strategy: right
     region: {width: 100}
     pattern: '\d{1,2}\s*[/\-.]\s*\d{1,2}\s*[/\-.]\s*\d{2,4}'

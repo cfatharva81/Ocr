@@ -8,8 +8,7 @@ PDF points (1/72 inch) on an upright page.
 from __future__ import annotations
 
 import logging
-import os
-import shutil
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,8 +18,6 @@ import numpy as np
 import pymupdf as fitz
 
 log = logging.getLogger(__name__)
-
-WINDOWS_TESSERACT = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 
 # ZapfDingbats characters that AcroForm checkboxes use for "checked".
 DINGBAT_CHECKS = {"3": "\u2713", "4": "\u2714", "5": "\u2717", "6": "\u2718", "7": "\u2717",
@@ -161,24 +158,22 @@ def _widgets(page: fitz.Page) -> list[Widget]:
     return out
 
 
-# --------------------------------------------------------------------- OCR (Tesseract)
+# --------------------------------------------------------------------- OCR (RapidOCR)
 
-def tesseract():
-    import pytesseract
-    cmd = os.environ.get("TESSERACT_CMD") or shutil.which("tesseract")
-    if not cmd and WINDOWS_TESSERACT.exists():
-        cmd = str(WINDOWS_TESSERACT)
-    if cmd:
-        pytesseract.pytesseract.tesseract_cmd = cmd
-    return pytesseract
+def ocr_engine():
+    from rapidocr_onnxruntime import RapidOCR
+    return RapidOCR()
 
 
-def tesseract_available() -> bool:
+def ocr_available() -> bool:
     try:
-        tesseract().get_tesseract_version()
+        ocr_engine()
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+tesseract_available = ocr_available
 
 
 def _shrink(img: np.ndarray, max_side: int) -> np.ndarray:
@@ -186,15 +181,27 @@ def _shrink(img: np.ndarray, max_side: int) -> np.ndarray:
     return cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA) if f < 1 else img
 
 
-def detect_orientation(img: np.ndarray) -> int:
-    """Clockwise degrees (0/90/180/270) needed to make the text upright (Tesseract OSD)."""
-    try:
-        pt = tesseract()
-        osd = pt.image_to_osd(_shrink(img, 2000), output_type=pt.Output.DICT, config="--psm 0")
-        return int(osd.get("rotate", 0)) % 360
-    except Exception as ex:  # noqa: BLE001 - OSD fails on nearly empty pages
-        log.debug("OSD failed: %s", ex)
-        return 0
+def detect_orientation(img: np.ndarray) -> tuple[int, list[Word]]:
+    """Detect 90-degree scans by checking OCR word-box orientation."""
+    words = ocr_page(img)
+
+    def horizontal_fraction(items: list[Word]) -> float:
+        return (sum(w.x1 - w.x0 > w.y1 - w.y0 for w in items) / len(items)
+                if items else 0.0)
+
+    if horizontal_fraction(words) >= 0.5:
+        return 0, words
+
+    candidates = [(0, words)]
+    for angle in (90, 180, 270):
+        candidates.append((angle, ocr_page(rotate(img, angle))))
+
+    def score(candidate: tuple[int, list[Word]]) -> tuple[float, float, int]:
+        _, items = candidate
+        confidence = sum(w.conf for w in items) / len(items) if items else 0.0
+        return horizontal_fraction(items), confidence, len(items)
+
+    return max(candidates, key=score)
 
 
 def rotate(img: np.ndarray, degrees_cw: int) -> np.ndarray:
@@ -246,16 +253,37 @@ def remove_rules(img: np.ndarray) -> np.ndarray:
 
 
 def ocr_page(img: np.ndarray) -> list[Word]:
-    """Word-level Tesseract OCR (sparse-text mode suits forms). Coordinates in pixels."""
-    pt = tesseract()
+    """Word-level RapidOCR output with coordinates in pixels."""
+    engine = ocr_engine()
     gray = cv2.medianBlur(remove_rules(img), 3)
-    data = pt.image_to_data(gray, lang="eng", config="--oem 1 --psm 11", output_type=pt.Output.DICT)
+    result, _ = engine(gray)
     words = []
-    for i, text in enumerate(data["text"]):
-        text, conf = (text or "").strip(), float(data["conf"][i])
-        if text and conf >= 0:
-            x, y, w, h = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
-            words.append(Word(text, x, y, x + w, y + h, conf / 100.0, "ocr"))
+    for box, text, conf in result or []:
+        text = (text or "").strip()
+        if text:
+            points = np.asarray(box, dtype=float)
+            x0, y0 = points.min(axis=0)
+            x1, y1 = points.max(axis=0)
+            tokens = []
+            for part in re.findall(r"\S+", text):
+                tokens.extend(token for token in re.split(
+                    r"(?<=[a-z])(?=[A-Z])|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])", part
+                ) if token)
+            if len(tokens) <= 1:
+                words.append(Word(text, x0, y0, x1, y1, float(conf), "ocr"))
+                continue
+
+            # RapidOCR often returns a whole line as one box. Approximate each
+            # token's horizontal extent so labels and adjacent values can anchor
+            # independently in the layout stage.
+            gap_units = 0.5
+            total_units = sum(len(token) for token in tokens) + gap_units * (len(tokens) - 1)
+            cursor = x0
+            box_width = x1 - x0
+            for index, token in enumerate(tokens):
+                token_width = box_width * len(token) / total_units
+                words.append(Word(token, cursor, y0, cursor + token_width, y1, float(conf), "ocr"))
+                cursor += token_width + (box_width * gap_units / total_units if index < len(tokens) - 1 else 0)
     return words
 
 
@@ -271,19 +299,18 @@ def ocr_region(img: np.ndarray, rect_px, whitelist: str | None = None) -> tuple[
     A tight, upscaled crop with a restricted character set is far more
     reliable for digits than page-level OCR on low-resolution scans.
     """
-    pt = tesseract()
     h, w = img.shape[:2]
     x0, y0, x1, y1 = max(0, rect_px[0]), max(0, rect_px[1]), min(w, rect_px[2]), min(h, rect_px[3])
     if x1 - x0 < 4 or y1 - y0 < 4:
         return "", 0.0
     crop = cv2.resize(remove_rules(img[y0:y1, x0:x1]), None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
     crop = cv2.copyMakeBorder(crop, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=255)
-    cfg = "--oem 1 --psm 7" + (f" -c tessedit_char_whitelist={whitelist}" if whitelist else "")
-    data = pt.image_to_data(crop, lang="eng", config=cfg, output_type=pt.Output.DICT)
-    toks = [(t.strip(), float(c)) for t, c in zip(data["text"], data["conf"]) if t.strip() and float(c) >= 0]
+    result, _ = ocr_engine()(crop)
+    toks = [(text.strip(), float(conf)) for _, text, conf in result or []
+            if text and text.strip()]
     if not toks:
         return "", 0.0
-    return " ".join(t for t, _ in toks), sum(c for _, c in toks) / len(toks) / 100.0
+    return " ".join(t for t, _ in toks), sum(c for _, c in toks) / len(toks)
 
 
 # --------------------------------------------------------------------- entry point
@@ -320,11 +347,12 @@ def load_pdf(path, max_pages: int = 3, dpi: int = 200, ocr_dpi: int = 300,
         # Scanned: render as displayed, then fix orientation and skew and OCR.
         page.set_rotation(file_rot)
         img = _to_bgr(page.get_pixmap(dpi=ocr_dpi))
-        osd_rot = detect_orientation(img)
+        osd_rot, ocr_words = detect_orientation(img)
         img = rotate(img, osd_rot)
         skew = round(estimate_skew(img), 2)
         img = deskew(img, skew)
-        ocr_words = ocr_page(img)
+        if abs(skew) >= 0.05:
+            ocr_words = ocr_page(img)
         s = ocr_dpi / 72.0
         for w in ocr_words:
             w.x0, w.y0, w.x1, w.y1 = w.x0 / s, w.y0 / s, w.x1 / s, w.y1 / s

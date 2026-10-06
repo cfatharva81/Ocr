@@ -193,10 +193,32 @@ def _label_value(ctx, lay: PageLayout, scope: Rect, fcfg: dict, fr: FieldResult)
     region = fcfg.get("region") or {}
     if fcfg.get("strategy") == "below":
         vm = lay.value_below(lm, region.get("width", 250), region.get("height", 25), scope)
+        pattern = fcfg.get("pattern")
+        if lay.page.is_scanned and pattern and (
+                vm is None or _apply_pattern(vm.text, pattern)[1] is False):
+            horizontal = lay.value_right_of(lm, region.get("width", 200), scope)
+            if horizontal and _apply_pattern(horizontal.text, pattern)[1] is not False:
+                vm = horizontal
     else:
         vm = lay.value_right_of(lm, region.get("width", 200), scope)
     fr.label_score = lm.score / 100.0
     if vm is None:
+        if lay.page.is_scanned:
+            width = region.get("width", 200)
+            pattern = fcfg.get("pattern")
+            overlap = 3 if pattern else -1
+            bbox = (lm.x1 - overlap, lm.y0 - 3,
+                    min(scope[2], lm.x1 + width), lm.y1 + 3)
+            text, conf = ocr_region(lay.page.image, lay.page.to_px(bbox),
+                                    WHITELIST.get(fcfg.get("type", "")))
+            value, matched = _apply_pattern(text, pattern)
+            if text.strip() and matched is not False:
+                fr.value, fr.pattern_ok = value, matched
+                fr.source_text, fr.page, fr.bbox = text, lay.page_no, bbox
+                fr.strategy = fcfg.get("strategy", "right") + "+reocr"
+                fr.source_conf = conf
+                fr.flags.append("re_ocr")
+                return
         fr.page, fr.bbox = lay.page_no, lm.bbox
         fr.flags.append("empty")
         return
@@ -515,14 +537,16 @@ class Result:
 
 # ====================================================================== pipeline
 
-def extract(pdf_path, config=None, force_ocr: bool = False, debug_dir=None) -> Result:
+def extract(pdf_path, config=None, force_ocr: bool = False, debug_dir=None,
+            max_pages: int | None = None) -> Result:
     t0 = time.perf_counter()
     cfg = load_config(config)
     settings = cfg.get("settings") or {}
     low = float(settings.get("low_confidence_threshold", 0.7))
 
     # 1. read pages, index layout, find sections
-    pages = load_pdf(pdf_path, max_pages=int(cfg.get("max_pages", 3)), force_ocr=force_ocr)
+    page_limit = max_pages if max_pages is not None else int(cfg.get("max_pages", 3))
+    pages = load_pdf(pdf_path, max_pages=page_limit, force_ocr=force_ocr)
     layouts = [PageLayout(p, all_labels(cfg)) for p in pages]
     regions, warnings = find_sections(layouts, cfg["form_sections"], float(settings.get("label_threshold", 80)))
     ctx = Context(cfg, layouts, regions)
@@ -580,7 +604,7 @@ def extract(pdf_path, config=None, force_ocr: bool = False, debug_dir=None) -> R
         "form": cfg.get("form"),
         "source_file": Path(pdf_path).name,
         "processing_time_s": None,
-        "ocr_engine": "tesseract" if any(p.is_scanned for p in pages) else None,
+        "ocr_engine": "rapidocr" if any(p.is_scanned for p in pages) else None,
         "pages": [{"page_no": p.page_no, "page_type": p.page_type, "file_rotation": p.file_rotation,
                    "rotation_applied": p.rotation_applied, "deskew_angle": p.deskew_angle,
                    "ocr_mean_confidence": p.ocr_mean_conf, "word_count": len(p.words),

@@ -1,6 +1,6 @@
-# Core (no LLMs, no cloud AI APIs)
+# Core 
 pymupdf>=1.24
-pytesseract>=0.3.10     # also install the Tesseract program (Windows: winget install UB-Mannheim.TesseractOCR)
+rapidocr-onnxruntime>=1.4
 opencv-python-headless>=4.8
 numpy>=1.26
 pydantic>=2.5

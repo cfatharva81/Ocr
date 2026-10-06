@@ -236,7 +236,7 @@ class PageLayout:
                 continue
             for s in starts:
                 best = None
-                for n in range(max(1, k - 1), k + 2):
+                for n in range(1, k + 2):
                     win = words[s:s + n]
                     if len(win) < n or any(id(w) in exclude for w in win):
                         continue
@@ -318,7 +318,7 @@ class PageLayout:
     def value_right_of(self, lm: LabelMatch, max_width: float = 200,
                        scope: Rect | None = None, max_gap: float | None = None) -> ValueMatch | None:
         """First run of words to the right of the label on the same row."""
-        x_start = lm.x1 - 0.5
+        x_start = lm.x1 - 6.0
         own_ids = {id(w) for w in lm.words}
         cand = [w for w in self.page.words
                 if id(w) not in own_ids and w.x0 >= x_start and w.x0 <= lm.x1 + max_width
@@ -443,8 +443,15 @@ def find_sections(layouts: list[PageLayout], form_sections: dict, threshold: flo
                 best = (score, lay, top, found)
         if best:
             score, lay, top, found = best
-            regions[name] = SectionRegion(name, lay.page_no, (0.0, max(0.0, top - 2), lay.page.width,
-                                                              lay.page.height), min(100.0, score), found)
+            late_partial_match = (spec.get("page_hint") == lay.page_no
+                                  and top > lay.page.height * 0.4
+                                  and len(found) < len(spec.get("anchors", [])))
+            if late_partial_match:
+                regions[name] = SectionRegion(name, lay.page_no, lay.full_rect, 0.0, found, "page_hint")
+                warnings.append(f"section {name}: partial anchors start too low; used page_hint={lay.page_no}")
+            else:
+                regions[name] = SectionRegion(name, lay.page_no, (0.0, max(0.0, top - 2), lay.page.width,
+                                                                  lay.page.height), min(100.0, score), found)
         elif spec.get("page_hint") and spec["page_hint"] <= len(layouts):
             lay = layouts[spec["page_hint"] - 1]
             regions[name] = SectionRegion(name, lay.page_no, lay.full_rect, 0.0, [], "page_hint")

@@ -163,12 +163,17 @@ def fill_ratio(lay: PageLayout, box: Rect, inset: float = 0.2) -> float:
 
 def _opencv_left_of(lay: PageLayout, label: LabelMatch, threshold: float, reach: float = 24.0
                     ) -> tuple[bool, float, Rect] | None:
+    boxes = getattr(lay, "_checkbox_boxes", None)
+    if boxes is None:
+        boxes = find_boxes(lay, lay.full_rect)
+        lay._checkbox_boxes = boxes
     cy = (label.y0 + label.y1) / 2
-    region = (label.x0 - reach, cy - 10, label.x0 + 1.0, cy + 10)
-    boxes = [b for b in find_boxes(lay, region) if b[2] <= label.x0 + 2]
+    boxes = [b for b in boxes
+             if label.x0 - reach <= b[2] and b[0] <= label.x0 + 12
+             and abs((b[1] + b[3]) / 2 - cy) <= 10]
     if not boxes:
         return None
-    box = max(boxes, key=lambda b: b[2])          # nearest to the label
+    box = min(boxes, key=lambda b: abs((b[0] + b[2]) / 2 - (label.x0 + 4)))
     ratio = fill_ratio(lay, box)
     return ratio >= threshold, ratio, box
 
