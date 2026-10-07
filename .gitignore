@@ -4,3 +4,4 @@ __pycache__/
 scratch/
 output/
 benchmark_run.log
+.env

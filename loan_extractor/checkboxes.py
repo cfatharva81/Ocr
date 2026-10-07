@@ -12,7 +12,7 @@ Every decision records which method decided it.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import cv2
@@ -164,11 +164,23 @@ def fill_ratio(lay: PageLayout, box: Rect, inset: float = 0.2) -> float:
 def _opencv_left_of(lay: PageLayout, label: LabelMatch, threshold: float, reach: float = 24.0
                     ) -> tuple[bool, float, Rect] | None:
     cy = (label.y0 + label.y1) / 2
-    region = (label.x0 - reach, cy - 10, label.x0 + 1.0, cy + 10)
-    boxes = [b for b in find_boxes(lay, region) if b[2] <= label.x0 + 2]
-    if not boxes:
-        return None
-    box = max(boxes, key=lambda b: b[2])          # nearest to the label
+
+    def aligned(b):   # a real checkbox is centred on the label's line, not above or below it
+        return abs((b[1] + b[3]) / 2 - cy) <= 4.0
+
+    boxes = [b for b in find_boxes(lay, (label.x0 - reach, cy - 10, label.x0 + 1.5, cy + 10))
+             if b[2] <= label.x0 + 2 and aligned(b)]
+    box = max(boxes, key=lambda b: b[2]) if boxes else None       # nearest to the label
+    if box is None:
+        # OCR often swallows the checkbox into the option's text box, so the
+        # square can start where the label is said to begin. Only its left
+        # edge may reach past the label start, which letters of the label
+        # cannot do, and the left-most candidate is the box.
+        wide = [b for b in find_boxes(lay, (label.x0 - reach, cy - 10, label.x0 + 16, cy + 10))
+                if b[0] <= label.x0 + 6 and aligned(b)]
+        if not wide:
+            return None
+        box = min(wide, key=lambda b: b[0])
     ratio = fill_ratio(lay, box)
     return ratio >= threshold, ratio, box
 
@@ -253,3 +265,82 @@ def detect_in_region(lay: PageLayout, region: Rect, threshold: float = 0.15) -> 
         ratio = fill_ratio(lay, box)
         return CheckboxDecision("cell", ratio >= threshold, "opencv", ratio, box)
     return CheckboxDecision("cell", False, "none", 0.0, None)
+
+
+# ------------------------------------------------------------------ marks for plain text
+# The LLM path sends text only, so every checkbox on the page is written into the
+# text as "[X]" / "[ ]" where it sits, without knowing any labels.
+
+def side_coverage(lay: PageLayout, box: Rect, strip: float = 0.15) -> float:
+    """How completely the box has ink along all four edges: for each side, the share of
+    its length with ink in a strip 15% of the box deep; the weakest side is returned.
+
+    A drawn checkbox is ~1.0 (>= 0.81 on a blurred, noisy 120 dpi scan); the round
+    letters (o, e, a ...) find_boxes() also returns have empty corners and stay <= 0.65.
+    """
+    s = lay.page.scale
+    x0, y0 = int(box[0] * s), int(box[1] * s)
+    x1, y1 = int(np.ceil(box[2] * s)), int(np.ceil(box[3] * s))
+    crop = lay.page.image[max(0, y0):y1, max(0, x0):x1]
+    if crop.size == 0:
+        return 0.0
+    ink = cv2.morphologyEx(_binary(crop), cv2.MORPH_CLOSE, np.ones((2, 2), np.uint8)) > 0   # as find_boxes
+    t = max(2, int(round(strip * min(ink.shape))))
+    return float(min(ink[:t].any(0).mean(), ink[-t:].any(0).mean(),
+                     ink[:, :t].any(1).mean(), ink[:, -t:].any(1).mean()))
+
+
+def _overlaps(a: Rect, b: Rect) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+# What OCR makes of a box outline or the tick in it; never real letters, except a lone X.
+_BOX_JUNK = set("[](){}|口区回囗□☐☒☑■●○◯✓✔✗✘βα")   # 口/区: RapidOCR reads boxes as CJK
+
+
+def page_checkboxes(lay: PageLayout, threshold: float = 0.15, min_side: float = 7.0,
+                    min_coverage: float = 0.73) -> list[CheckboxDecision]:
+    """Every checkbox on the page, whatever its label: AcroForm widgets first, then drawn
+    squares on the page image, checked when their ink fill ratio reaches `threshold`.
+
+    Squares smaller than `min_side` points, or without ink along all four edges
+    (side_coverage), are letters, not boxes.
+    """
+    out = [CheckboxDecision("", w.checked, "widget", 1.0, tuple(w.rect), widget_name=w.name)
+           for w in lay.page.widgets if w.is_checkbox]
+    for b in find_boxes(lay, lay.full_rect):
+        if min(b[2] - b[0], b[3] - b[1]) < min_side or side_coverage(lay, b) < min_coverage:
+            continue
+        if any(_overlaps(b, d.box_bbox) for d in out):
+            continue
+        ratio = fill_ratio(lay, b)
+        out.append(CheckboxDecision("", ratio >= threshold, "opencv", round(ratio, 3), b))
+    return out
+
+
+def words_with_marks(lay: PageLayout, decisions: list[CheckboxDecision]) -> list[Word]:
+    """The page's words with each checkbox as a "[X]" / "[ ]" word in its place.
+
+    OCR word boxes often take in the checkbox ("[I am", "αNO", "[X]Own"), so a word on
+    top of a box loses its leading box characters (never letters) and is moved to just
+    right of the box, behind its mark. A word that is only box characters, or a lone X
+    inside a box, is the box itself and is dropped. A check glyph with no box around it
+    ("X", "☒", "✓") becomes "[X]".
+    """
+    boxes = [d.box_bbox for d in decisions]
+    out = []
+    for w in lay.page.words:
+        box = next((b for b in boxes if w.x0 < b[2] - 1 and b[0] < w.x1
+                    and abs(w.cy - (b[1] + b[3]) / 2) <= (b[3] - b[1]) / 2), None)
+        if box is not None:
+            m = _GLYPH_PREFIX.match(w.text)
+            text = w.text[m.end():] if m else w.text.lstrip("".join(_BOX_JUNK) + " ")
+            if not text or (is_check_glyph(text) and w.cx <= box[2]):
+                continue
+            w = replace(w, text=text, x0=max(w.x0, box[2] + 0.1))
+        elif is_check_glyph(w.text):
+            w = replace(w, text="[X]")
+        out.append(w)
+    for d in decisions:
+        out.append(Word("[X]" if d.checked else "[ ]", *d.box_bbox, conf=1.0, source="checkbox"))
+    return out

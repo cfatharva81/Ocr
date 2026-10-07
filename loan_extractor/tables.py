@@ -21,7 +21,7 @@ from rapidfuzz import fuzz
 
 from . import checkboxes as cb
 from .layout import PageLayout, Rect, group_rows, join, mean_conf, norm, union
-from .pdf_reader import WHITELIST, Word, ocr_region
+from .pdf_reader import Word, ocr_region
 
 HEADER_MIN = 75.0
 MAX_ROW_GAP = 120.0      # points
@@ -162,6 +162,14 @@ def _cell_value(lay: PageLayout, bbox: Rect, ccfg: dict, threshold: float) -> Ce
                           "decisions": [d.as_dict() for d in g.decisions]})
     text = join(words) if words else None
     cv = CellValue(text, text, union(words), mean_conf(words), words)
+    if scanned and text:
+        # OCR merges neighbouring columns into one box ("1234567890$12,750.01");
+        # such a box sticks out of the cell. Re-reading the cell alone splits it.
+        merged = any(w.x1 > bbox[2] + 1 or w.x0 < bbox[0] - 1 for w in words)
+        shaped = ctype not in CELL_PATTERNS or bool(CELL_PATTERNS[ctype].fullmatch(text))
+        glued = bool(re.search(r"[a-z][A-Z]", text))        # "FirstNationalBank"
+        if merged or glued or not shaped or cv.conf < REOCR_BELOW_CONF:
+            _reocr_cell(lay, bbox, ctype, cv, merged=merged, glued=glued)
     # OCR'd typed cells that fail their shape, or were read with low confidence,
     # are re-read on their own (tight crop, whitelisted characters).
     if scanned and text and ctype in CELL_PATTERNS and (
@@ -180,14 +188,20 @@ CELL_PATTERNS = {
 }
 
 
-def _reocr_cell(lay: PageLayout, bbox: Rect, ctype: str, cv: CellValue):
-    region = cv.bbox or bbox
+def _reocr_cell(lay: PageLayout, bbox: Rect, ctype: str, cv: CellValue, merged: bool = False,
+                glued: bool = False):
+    """Read one cell on its own. A merged cell needs detection to split it."""
+    region = bbox if merged or not cv.bbox else cv.bbox
     rect = (region[0] - 2, region[1] - 2, region[2] + 4, region[3] + 2)
-    text, conf = ocr_region(lay.page.image, lay.page.to_px(rect), WHITELIST.get(ctype))
-    text = text.replace(" ", "")
-    shape_ok = bool(cv.text) and bool(CELL_PATTERNS[ctype].fullmatch(cv.text))
-    # keep the page-level reading unless it was malformed or the re-read is more confident
-    if text and CELL_PATTERNS[ctype].fullmatch(text) and (not shape_ok or conf > cv.conf):
+    text, conf = ocr_region(lay.page.image, lay.page.to_px(rect), fast=not merged)
+    pattern = CELL_PATTERNS.get(ctype)
+    if pattern:
+        text = text.replace(" ", "")
+    if not text or (pattern and not pattern.fullmatch(text)):
+        return
+    shape_ok = bool(cv.text) and bool(pattern.fullmatch(cv.text)) if pattern else bool(cv.text)
+    recovered_spaces = glued and text.count(" ") > (cv.text or "").count(" ")
+    if merged or recovered_spaces or not shape_ok or conf > cv.conf:
         cv.text = cv.value = text
         cv.conf = conf
         cv.reocr = True
@@ -260,6 +274,9 @@ def _from_clusters(lay: PageLayout, scope: Rect, tcfg: dict, threshold: float) -
         found = []
         for alias in ccfg["headers"]:
             found += lay.find_labels(alias, scope, threshold=HEADER_MIN, phrase_start=False)
+        if not found:
+            # OCR may have merged this header into a neighbouring one
+            found = [m for m in (lay.find_label_in_token(a, scope) for a in ccfg["headers"]) if m]
         cands[fname] = found
     ys = sorted({round(m.y0) for ms in cands.values() for m in ms})
     best_y, best_n = None, 0

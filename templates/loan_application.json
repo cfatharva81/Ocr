@@ -1,0 +1,514 @@
+{
+  "template_version": 1,
+  "document_type": "URLA Form 1003 loan application",
+  "sections": [
+    {
+      "key": "borrower_personal_information",
+      "title": "1a. Personal Information",
+      "fields": [
+        {
+          "key": "borrower_name",
+          "label": "Name (First, Middle, Last, Suffix)",
+          "value_type": "text"
+        },
+        {
+          "key": "social_security_number",
+          "label": "Social Security Number",
+          "value_type": "id"
+        },
+        {
+          "key": "alternate_names",
+          "label": "Alternate Names - List any names by which you are known (First, Middle, Last, Suffix)",
+          "value_type": "text"
+        },
+        {
+          "key": "date_of_birth",
+          "label": "Date of Birth (mm/dd/yyyy)",
+          "value_type": "date"
+        },
+        {
+          "key": "citizenship",
+          "label": "Citizenship",
+          "value_type": "text"
+        },
+        {
+          "key": "type_of_credit",
+          "label": "Type of Credit",
+          "value_type": "text"
+        },
+        {
+          "key": "total_number_of_borrowers",
+          "label": "Total Number of Borrowers",
+          "value_type": "integer"
+        },
+        {
+          "key": "marital_status",
+          "label": "Marital Status",
+          "value_type": "text"
+        },
+        {
+          "key": "dependents_number",
+          "label": "Dependents (not listed by another Borrower) Number",
+          "value_type": "integer"
+        },
+        {
+          "key": "dependents_ages",
+          "label": "Ages",
+          "value_type": "text"
+        },
+        {
+          "key": "home_phone",
+          "label": "Home Phone",
+          "value_type": "phone"
+        },
+        {
+          "key": "cell_phone",
+          "label": "Cell Phone",
+          "value_type": "phone"
+        },
+        {
+          "key": "work_phone",
+          "label": "Work Phone",
+          "value_type": "phone"
+        },
+        {
+          "key": "work_phone_ext",
+          "label": "Ext.",
+          "value_type": "text"
+        },
+        {
+          "key": "email",
+          "label": "Email",
+          "value_type": "email"
+        },
+        {
+          "key": "current_street_address",
+          "label": "Street",
+          "value_type": "text"
+        },
+        {
+          "key": "current_unit_number",
+          "label": "Unit #",
+          "value_type": "text"
+        },
+        {
+          "key": "current_city",
+          "label": "City",
+          "value_type": "text"
+        },
+        {
+          "key": "current_state",
+          "label": "State",
+          "value_type": "text"
+        },
+        {
+          "key": "current_zip",
+          "label": "ZIP",
+          "value_type": "text"
+        },
+        {
+          "key": "current_country",
+          "label": "Country",
+          "value_type": "text"
+        },
+        {
+          "key": "how_long_at_current_address",
+          "label": "How Long at Current Address?",
+          "value_type": "text"
+        },
+        {
+          "key": "housing",
+          "label": "Housing",
+          "value_type": "text"
+        }
+      ],
+      "tables": []
+    },
+    {
+      "key": "borrower_employment_and_income",
+      "title": "1b. Current Employment/Self-Employment and Income",
+      "fields": [
+        {
+          "key": "employer_name",
+          "label": "Employer or Business Name",
+          "value_type": "text"
+        },
+        {
+          "key": "employer_phone",
+          "label": "Phone",
+          "value_type": "phone"
+        },
+        {
+          "key": "employer_street",
+          "label": "Street",
+          "value_type": "text"
+        },
+        {
+          "key": "employer_unit",
+          "label": "Unit #",
+          "value_type": "text"
+        },
+        {
+          "key": "employer_city",
+          "label": "City",
+          "value_type": "text"
+        },
+        {
+          "key": "employer_state",
+          "label": "State",
+          "value_type": "text"
+        },
+        {
+          "key": "employer_zip",
+          "label": "ZIP",
+          "value_type": "text"
+        },
+        {
+          "key": "employer_country",
+          "label": "Country",
+          "value_type": "text"
+        },
+        {
+          "key": "position_title",
+          "label": "Position or Title",
+          "value_type": "text"
+        },
+        {
+          "key": "start_date",
+          "label": "Start Date (mm/dd/yyyy)",
+          "value_type": "date"
+        },
+        {
+          "key": "how_long_in_this_line_of_work",
+          "label": "How long in this line of work?",
+          "value_type": "text"
+        },
+        {
+          "key": "base_income",
+          "label": "Base",
+          "value_type": "currency"
+        },
+        {
+          "key": "overtime_income",
+          "label": "Overtime",
+          "value_type": "currency"
+        },
+        {
+          "key": "bonus_income",
+          "label": "Bonus",
+          "value_type": "currency"
+        },
+        {
+          "key": "commission_income",
+          "label": "Commission",
+          "value_type": "currency"
+        },
+        {
+          "key": "military_entitlements_income",
+          "label": "Military Entitlements",
+          "value_type": "currency"
+        },
+        {
+          "key": "other_income",
+          "label": "Other",
+          "value_type": "currency"
+        },
+        {
+          "key": "total_gross_monthly_income",
+          "label": "TOTAL",
+          "value_type": "currency"
+        }
+      ],
+      "tables": []
+    },
+    {
+      "key": "financial_information_assets",
+      "title": "2a. Assets - Bank, Retirement, and Other Accounts You Have",
+      "fields": [
+        {
+          "key": "total_assets",
+          "label": "Provide TOTAL Amount Here",
+          "value_type": "currency"
+        }
+      ],
+      "tables": [
+        {
+          "key": "assets_accounts",
+          "title": null,
+          "columns": [
+            {
+              "key": "account_type",
+              "value_type": "text"
+            },
+            {
+              "key": "financial_institution",
+              "value_type": "text"
+            },
+            {
+              "key": "account_number",
+              "value_type": "id"
+            },
+            {
+              "key": "cash_or_market_value",
+              "value_type": "currency"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "other_assets_and_credits",
+      "title": "2b. Other Assets and Credits You Have",
+      "fields": [
+        {
+          "key": "no_other_assets",
+          "label": "Check if you don't have any other assets",
+          "value_type": "boolean"
+        },
+        {
+          "key": "total_other_assets",
+          "label": "Provide TOTAL Amount Here",
+          "value_type": "currency"
+        }
+      ],
+      "tables": [
+        {
+          "key": "other_assets_table",
+          "title": null,
+          "columns": [
+            {
+              "key": "asset_or_credit_type",
+              "value_type": "text"
+            },
+            {
+              "key": "cash_or_market_value",
+              "value_type": "currency"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "financial_information_liabilities",
+      "title": "2c. Liabilities - Credit Cards, Other Debts, and Leases that You Owe",
+      "fields": [
+        {
+          "key": "no_liabilities",
+          "label": "Check if you don't have any liabilities",
+          "value_type": "boolean"
+        },
+        {
+          "key": "total_unpaid_balance",
+          "label": "TOTAL",
+          "value_type": "currency"
+        },
+        {
+          "key": "total_monthly_payment",
+          "label": "TOTAL",
+          "value_type": "currency"
+        }
+      ],
+      "tables": [
+        {
+          "key": "liabilities_table",
+          "title": null,
+          "columns": [
+            {
+              "key": "account_type",
+              "value_type": "text"
+            },
+            {
+              "key": "company_name",
+              "value_type": "text"
+            },
+            {
+              "key": "account_number",
+              "value_type": "id"
+            },
+            {
+              "key": "unpaid_balance",
+              "value_type": "currency"
+            },
+            {
+              "key": "to_be_paid_off_at_or_before_closing",
+              "value_type": "boolean"
+            },
+            {
+              "key": "monthly_payment",
+              "value_type": "currency"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "financial_information_real_estate",
+      "title": "Section 3: Financial Information - Real Estate.",
+      "fields": [
+        {
+          "key": "no_real_estate",
+          "label": "I do not own any real estate",
+          "value_type": "boolean"
+        },
+        {
+          "key": "property_street",
+          "label": "Street",
+          "value_type": "text"
+        },
+        {
+          "key": "property_unit",
+          "label": "Unit #",
+          "value_type": "text"
+        },
+        {
+          "key": "property_city",
+          "label": "City",
+          "value_type": "text"
+        },
+        {
+          "key": "property_state",
+          "label": "State",
+          "value_type": "text"
+        },
+        {
+          "key": "property_zip",
+          "label": "ZIP",
+          "value_type": "text"
+        },
+        {
+          "key": "property_country",
+          "label": "Country",
+          "value_type": "text"
+        },
+        {
+          "key": "property_value",
+          "label": "Property Value",
+          "value_type": "currency"
+        },
+        {
+          "key": "property_status",
+          "label": "Status: Sold, Pending Sale, or Retained",
+          "value_type": "text"
+        },
+        {
+          "key": "additional_property_does_not_apply",
+          "label": "Does not apply",
+          "value_type": "boolean"
+        }
+      ],
+      "tables": []
+    },
+    {
+      "key": "loan_and_property_information",
+      "title": "4a. Loan and Property Information",
+      "fields": [
+        {
+          "key": "loan_amount",
+          "label": "Loan Amount",
+          "value_type": "currency"
+        },
+        {
+          "key": "loan_purpose",
+          "label": "Loan Purpose",
+          "value_type": "text"
+        },
+        {
+          "key": "loan_purpose_other",
+          "label": "Other (specify)",
+          "value_type": "text"
+        },
+        {
+          "key": "subject_property_street",
+          "label": "Street",
+          "value_type": "text"
+        },
+        {
+          "key": "subject_property_unit",
+          "label": "Unit #",
+          "value_type": "text"
+        },
+        {
+          "key": "subject_property_city",
+          "label": "City",
+          "value_type": "text"
+        },
+        {
+          "key": "subject_property_state",
+          "label": "State",
+          "value_type": "text"
+        },
+        {
+          "key": "subject_property_zip",
+          "label": "ZIP",
+          "value_type": "text"
+        },
+        {
+          "key": "subject_property_county",
+          "label": "County",
+          "value_type": "text"
+        },
+        {
+          "key": "number_of_units",
+          "label": "Number of Units",
+          "value_type": "integer"
+        },
+        {
+          "key": "subject_property_value",
+          "label": "Property Value",
+          "value_type": "currency"
+        },
+        {
+          "key": "occupancy",
+          "label": "Occupancy",
+          "value_type": "text"
+        },
+        {
+          "key": "mixed_use_property",
+          "label": "1. Mixed-Use Property. If you will occupy the property, will you set aside space within the property to operate your own business?",
+          "value_type": "text"
+        },
+        {
+          "key": "manufactured_home",
+          "label": "2. Manufactured Home. Is the property a manufactured home?",
+          "value_type": "text"
+        }
+      ],
+      "tables": []
+    },
+    {
+      "key": "gifts_or_grants",
+      "title": "4d. Gifts or Grants You Have Been Given or Will Receive for this Loan",
+      "fields": [
+        {
+          "key": "gifts_grants_does_not_apply",
+          "label": "Does not apply",
+          "value_type": "boolean"
+        }
+      ],
+      "tables": [
+        {
+          "key": "gifts_grants_table",
+          "title": null,
+          "columns": [
+            {
+              "key": "asset_type",
+              "value_type": "text"
+            },
+            {
+              "key": "deposited_status",
+              "value_type": "text"
+            },
+            {
+              "key": "source",
+              "value_type": "text"
+            },
+            {
+              "key": "cash_or_market_value",
+              "value_type": "currency"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

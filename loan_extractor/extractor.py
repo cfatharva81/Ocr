@@ -27,7 +27,7 @@ from . import checkboxes as cb
 from . import tables
 from .layout import LabelMatch, PageLayout, Rect, SectionRegion, ValueMatch, find_sections, union
 from .normalizers import currency, mask_sensitive
-from .pdf_reader import WHITELIST, Page, load_pdf, ocr_region
+from .pdf_reader import Page, load_pdf, ocr_region
 from .schemas import (GROUP_MODELS, ROW_MODELS, AssetsInformation, Extracted, LiabilitySummary,
                       LoanApplication, OtherAssets, required_fields)
 
@@ -198,24 +198,38 @@ def _label_value(ctx, lay: PageLayout, scope: Rect, fcfg: dict, fr: FieldResult)
     fr.label_score = lm.score / 100.0
     if vm is None:
         fr.page, fr.bbox = lay.page_no, lm.bbox
+        # A short value is easy for page-level OCR to miss entirely; re-read
+        # the region the value would occupy before calling the field empty.
+        if lay.page.is_scanned and fcfg.get("strategy") != "below":
+            rect = (lm.x1 + 1, lm.y0 - 3, lm.x1 + region.get("width", 120), lm.y1 + 3)
+            text, conf = ocr_region(lay.page.image, lay.page.to_px(rect))
+            text = lay.cut_at_stop_text(text)
+            if text:
+                fr.value, fr.pattern_ok = _apply_pattern(text, fcfg.get("pattern"))
+                fr.source_text, fr.bbox, fr.source_conf = text, rect, conf
+                fr.strategy = (fcfg.get("strategy", "right")) + "+reocr"
+                fr.flags.append("re_ocr")
+                return
         fr.flags.append("empty")
         return
     fr.value, fr.pattern_ok = _apply_pattern(vm.text, fcfg.get("pattern"))
     fr.source_text, fr.page, fr.bbox = vm.text, lay.page_no, vm.bbox
     fr.strategy = fcfg.get("strategy", "right")
     fr.source_conf = vm.conf if lay.page.is_scanned else NATIVE_CONF
-    if fr.pattern_ok is False and lay.page.is_scanned:
+    # "JohnMichael Doe" / "789OakAvenue": OCR lost the spaces between words
+    glued_words = bool(re.search(r"[a-z][A-Z]", vm.text)) or (
+        len(vm.text) >= 10 and " " not in vm.text and not vm.text.isdigit())
+    if lay.page.is_scanned and (fr.pattern_ok is False or glued_words):
         _reread(lay, vm, fcfg, fr)
 
 
 def _reread(lay: PageLayout, vm: ValueMatch, fcfg: dict, fr: FieldResult):
     """A scanned value failed its pattern: OCR just that region again, whitelisted."""
     x0, y0, x1, y1 = vm.bbox
-    text, conf = ocr_region(lay.page.image, lay.page.to_px((x0 - 2, y0 - 3, x1 + 4, y1 + 3)),
-                            WHITELIST.get(fcfg.get("type", "")))
+    text, conf = ocr_region(lay.page.image, lay.page.to_px((x0 - 2, y0 - 3, x1 + 4, y1 + 3)), fast=True)
     val, ok = _apply_pattern(text, fcfg.get("pattern"))
-    if ok:
-        fr.value, fr.source_text, fr.pattern_ok, fr.source_conf = val, text, True, conf
+    if text and (ok or (ok is None and " " in text)):
+        fr.value, fr.source_text, fr.pattern_ok, fr.source_conf = val, text, ok, conf
         fr.strategy += "+reocr"
         fr.flags.append("re_ocr")
 
@@ -522,7 +536,10 @@ def extract(pdf_path, config=None, force_ocr: bool = False, debug_dir=None) -> R
     low = float(settings.get("low_confidence_threshold", 0.7))
 
     # 1. read pages, index layout, find sections
-    pages = load_pdf(pdf_path, max_pages=int(cfg.get("max_pages", 3)), force_ocr=force_ocr)
+    expected = all_labels(cfg) + [a for sec in cfg["form_sections"].values()
+                                  for a in sec.get("anchors", [])]
+    pages = load_pdf(pdf_path, max_pages=int(cfg.get("max_pages", 3)), force_ocr=force_ocr,
+                     expected_text=expected)
     layouts = [PageLayout(p, all_labels(cfg)) for p in pages]
     regions, warnings = find_sections(layouts, cfg["form_sections"], float(settings.get("label_threshold", 80)))
     ctx = Context(cfg, layouts, regions)
@@ -580,7 +597,7 @@ def extract(pdf_path, config=None, force_ocr: bool = False, debug_dir=None) -> R
         "form": cfg.get("form"),
         "source_file": Path(pdf_path).name,
         "processing_time_s": None,
-        "ocr_engine": "tesseract" if any(p.is_scanned for p in pages) else None,
+        "ocr_engine": "rapidocr" if any(p.is_scanned for p in pages) else None,
         "pages": [{"page_no": p.page_no, "page_type": p.page_type, "file_rotation": p.file_rotation,
                    "rotation_applied": p.rotation_applied, "deskew_angle": p.deskew_angle,
                    "ocr_mean_confidence": p.ocr_mean_conf, "word_count": len(p.words),

@@ -1,15 +1,14 @@
 """Read a PDF into upright pages of words with bounding boxes.
 
 Native pages use the PDF text layer (plus AcroForm widgets). Scanned pages are
-rendered, turned upright with Tesseract OSD, deskewed with OpenCV and OCR'd
-with Tesseract. Either way every word ends up in the same coordinate system:
-PDF points (1/72 inch) on an upright page.
+rendered, turned upright, deskewed with OpenCV and OCR'd with RapidOCR
+(ONNX Runtime, nothing to install outside pip). Either way every word ends up
+in the same coordinate system: PDF points (1/72 inch) on an upright page.
 """
 from __future__ import annotations
 
 import logging
-import os
-import shutil
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,8 +18,6 @@ import numpy as np
 import pymupdf as fitz
 
 log = logging.getLogger(__name__)
-
-WINDOWS_TESSERACT = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 
 # ZapfDingbats characters that AcroForm checkboxes use for "checked".
 DINGBAT_CHECKS = {"3": "\u2713", "4": "\u2714", "5": "\u2717", "6": "\u2718", "7": "\u2717",
@@ -161,21 +158,23 @@ def _widgets(page: fitz.Page) -> list[Widget]:
     return out
 
 
-# --------------------------------------------------------------------- OCR (Tesseract)
+# --------------------------------------------------------------------- OCR (RapidOCR)
 
-def tesseract():
-    import pytesseract
-    cmd = os.environ.get("TESSERACT_CMD") or shutil.which("tesseract")
-    if not cmd and WINDOWS_TESSERACT.exists():
-        cmd = str(WINDOWS_TESSERACT)
-    if cmd:
-        pytesseract.pytesseract.tesseract_cmd = cmd
-    return pytesseract
+_ENGINE = None
 
 
-def tesseract_available() -> bool:
+def engine():
+    """The RapidOCR engine, loaded once (its ONNX models ship with the package)."""
+    global _ENGINE
+    if _ENGINE is None:
+        from rapidocr_onnxruntime import RapidOCR
+        _ENGINE = RapidOCR()
+    return _ENGINE
+
+
+def ocr_available() -> bool:
     try:
-        tesseract().get_tesseract_version()
+        engine()
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -186,21 +185,42 @@ def _shrink(img: np.ndarray, max_side: int) -> np.ndarray:
     return cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA) if f < 1 else img
 
 
-def detect_orientation(img: np.ndarray) -> int:
-    """Clockwise degrees (0/90/180/270) needed to make the text upright (Tesseract OSD)."""
-    try:
-        pt = tesseract()
-        osd = pt.image_to_osd(_shrink(img, 2000), output_type=pt.Output.DICT, config="--psm 0")
-        return int(osd.get("rotate", 0)) % 360
-    except Exception as ex:  # noqa: BLE001 - OSD fails on nearly empty pages
-        log.debug("OSD failed: %s", ex)
-        return 0
-
-
 def rotate(img: np.ndarray, degrees_cw: int) -> np.ndarray:
     codes = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
     code = codes.get(degrees_cw % 360)
     return cv2.rotate(img, code) if code is not None else img
+
+
+def remove_rules(img: np.ndarray) -> np.ndarray:
+    """Blank out long ruled lines (form rules, table grids).
+
+    Table borders touching the text confuse the orientation check; checkbox
+    squares are shorter than the kernel and survive.
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    k = max(40, gray.shape[1] // 40)
+    horiz = cv2.morphologyEx(bw, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (k, 1)))
+    vert = cv2.morphologyEx(bw, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, k)))
+    out = gray.copy()
+    out[cv2.dilate(horiz | vert, np.ones((3, 3), np.uint8)) > 0] = 255
+    return out
+
+
+def is_sideways(img: np.ndarray) -> bool:
+    """Do the text lines run vertically (page rotated 90 or 270)?
+
+    Dilating along the text direction merges characters into lines, so the
+    direction that leaves fewer connected components is the text direction.
+    Needs no OCR and takes about 0.1s per page.
+    """
+    bw = cv2.threshold(remove_rules(img), 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    bw = _shrink(bw, 1600)
+    counts = []
+    for k in ((15, 1), (1, 15)):
+        counts.append(cv2.connectedComponentsWithStats(
+            cv2.dilate(bw, cv2.getStructuringElement(cv2.MORPH_RECT, k)))[0])
+    return counts[0] > counts[1]        # merging horizontally helped less -> vertical text
 
 
 def estimate_skew(img: np.ndarray, max_angle: float = 10.0) -> float:
@@ -228,69 +248,129 @@ def deskew(img: np.ndarray, angle: float) -> np.ndarray:
                           borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
 
 
-def remove_rules(img: np.ndarray) -> np.ndarray:
-    """Blank out long ruled lines (form rules, table grids) before OCR.
+def _ascii_punct(text: str) -> str:
+    """Fold full-width characters to ASCII.
 
-    Table borders touching the text hurt Tesseract badly (page 2 of the sample
-    goes from 0.68 to 0.94 mean confidence). Checkbox squares are shorter than
-    the kernel and survive.
+    The recognition model is multilingual and sometimes returns the full-width
+    forms of brackets, commas or digits, which would not match the config.
     """
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
-    bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-    k = max(40, gray.shape[1] // 40)
-    horiz = cv2.morphologyEx(bw, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (k, 1)))
-    vert = cv2.morphologyEx(bw, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, k)))
-    out = gray.copy()
-    out[cv2.dilate(horiz | vert, np.ones((3, 3), np.uint8)) > 0] = 255
-    return out
+    out = []
+    for ch in text:
+        code = ord(ch)
+        if 0xFF01 <= code <= 0xFF5E:          # full-width ASCII block
+            out.append(chr(code - 0xFEE0))
+        elif ch in "、。：；":    # CJK comma / full stop / colon / semicolon
+            out.append({"、": ",", "。": ".", "：": ":", "；": ";"}[ch])
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
-def ocr_page(img: np.ndarray) -> list[Word]:
-    """Word-level Tesseract OCR (sparse-text mode suits forms). Coordinates in pixels."""
-    pt = tesseract()
-    gray = cv2.medianBlur(remove_rules(img), 3)
-    data = pt.image_to_data(gray, lang="eng", config="--oem 1 --psm 11", output_type=pt.Output.DICT)
-    words = []
-    for i, text in enumerate(data["text"]):
-        text, conf = (text or "").strip(), float(data["conf"][i])
-        if text and conf >= 0:
-            x, y, w, h = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
-            words.append(Word(text, x, y, x + w, y + h, conf / 100.0, "ocr"))
+def _split_box(text: str, x0: float, y0: float, x1: float, y1: float, conf: float) -> list[Word]:
+    """Split one detected text box into words, spaced by character count."""
+    text = _ascii_punct(text).strip()
+    if not text:
+        return []
+    per_char = (x1 - x0) / len(text)
+    words, pos = [], 0
+    for tok in text.split():
+        start = text.index(tok, pos)
+        pos = start + len(tok)
+        words.append(Word(tok, x0 + start * per_char, y0, x0 + pos * per_char, y1, conf, "ocr"))
     return words
 
 
-# Characters a typed value may contain; used to re-read single values.
-WHITELIST = {"ssn": "0123456789-", "date": "0123456789/-.", "phone": "0123456789()-.",
-             "zip": "0123456789-", "int": "0123456789", "currency": "$0123456789,.",
-             "account": "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"}
+def ocr_page(img: np.ndarray) -> list[Word]:
+    """OCR a page image with RapidOCR. Coordinates are image pixels, conf is 0..1.
 
-
-def ocr_region(img: np.ndarray, rect_px, whitelist: str | None = None) -> tuple[str, float]:
-    """Re-read one small region as a single line (psm 7), optionally whitelisted.
-
-    A tight, upscaled crop with a restricted character set is far more
-    reliable for digits than page-level OCR on low-resolution scans.
+    RapidOCR detects text regions - on a form that is usually one box per
+    printed label and one per filled-in value - so the boxes line up with the
+    phrases the layout code looks for. use_cls is off: its job is to flip
+    upside-down lines, which would hide a rotated page instead of fixing it.
     """
-    pt = tesseract()
+    result, _ = engine()(img, use_cls=False)
+    words = []
+    for box, text, conf in result or []:
+        xs = [p[0] for p in box]
+        ys = [p[1] for p in box]
+        words += _split_box(text, min(xs), min(ys), max(xs), max(ys), float(conf))
+    return words
+
+
+def ocr_region(img: np.ndarray, rect_px, fast: bool = False) -> tuple[str, float]:
+    """Re-read one small region (a single value or table cell) on its own.
+
+    Running detection again inside the padded crop keeps table borders and
+    neighbouring columns out of the result, which page-level OCR tends to
+    merge. `fast` skips detection (a few times quicker) and suits a crop that
+    already holds exactly one value.
+    """
     h, w = img.shape[:2]
     x0, y0, x1, y1 = max(0, rect_px[0]), max(0, rect_px[1]), min(w, rect_px[2]), min(h, rect_px[3])
     if x1 - x0 < 4 or y1 - y0 < 4:
         return "", 0.0
-    crop = cv2.resize(remove_rules(img[y0:y1, x0:x1]), None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-    crop = cv2.copyMakeBorder(crop, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=255)
-    cfg = "--oem 1 --psm 7" + (f" -c tessedit_char_whitelist={whitelist}" if whitelist else "")
-    data = pt.image_to_data(crop, lang="eng", config=cfg, output_type=pt.Output.DICT)
-    toks = [(t.strip(), float(c)) for t, c in zip(data["text"], data["conf"]) if t.strip() and float(c) >= 0]
-    if not toks:
-        return "", 0.0
-    return " ".join(t for t, _ in toks), sum(c for _, c in toks) / len(toks) / 100.0
+    crop = cv2.resize(img[y0:y1, x0:x1], None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    crop = cv2.copyMakeBorder(crop, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+    result = None
+    if not fast:
+        result, _ = engine()(crop, use_cls=False)
+    if not result:
+        result, _ = engine()(crop, use_det=False, use_cls=False, use_rec=True)
+        if not result:
+            return "", 0.0
+        return str(result[0][0]).strip(), float(result[0][1])
+    result = sorted(result, key=lambda r: min(p[0] for p in r[0]))      # left to right
+    text = " ".join(str(r[1]).strip() for r in result)
+    return text.strip(), float(np.mean([float(r[2]) for r in result]))
+
+
+def _squash(s: str) -> str:
+    """Lowercase alphanumerics only - OCR sometimes drops the spaces between words."""
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+def text_match_score(words: list[Word], expected: list[str]) -> float:
+    """Fraction of the expected phrases that appear in the page text.
+
+    Tells an upright page from an upside-down one: a 180-degree page reads as
+    mirrored nonsense and matches almost nothing.
+    """
+    wanted = [e for e in (_squash(x) for x in expected) if len(e) >= 8]
+    if not wanted:
+        return 1.0
+    page = _squash(" ".join(w.text for w in words))
+    return sum(e in page for e in wanted) / len(wanted)
 
 
 # --------------------------------------------------------------------- entry point
 
+def _ocr_upright(img: np.ndarray, expected: list[str]) -> tuple[np.ndarray, list[Word], int]:
+    """OCR a page image, turning it upright first. Returns (image, words, rotation applied).
+
+    Sideways pages are spotted from the image itself; whether the result is
+    then upright or upside down is decided by how much of the expected form
+    text was actually read, re-reading the flipped image only when needed.
+    """
+    rot = 90 if is_sideways(img) else 0
+    img = rotate(img, rot)
+    words = ocr_page(img)
+    if expected and text_match_score(words, expected) < 0.25:
+        flipped = rotate(img, 180)
+        alt = ocr_page(flipped)
+        if text_match_score(alt, expected) > text_match_score(words, expected):
+            log.info("page was upside down: rotated 180")
+            return flipped, alt, (rot + 180) % 360
+    return img, words, rot
+
+
 def load_pdf(path, max_pages: int = 3, dpi: int = 200, ocr_dpi: int = 300,
-             force_ocr: bool = False, min_native_words: int = 25) -> list[Page]:
-    """Load the first pages as upright Pages; pages without a text layer are OCR'd."""
+             force_ocr: bool = False, min_native_words: int = 25,
+             expected_text: list[str] | None = None) -> list[Page]:
+    """Load the first pages as upright Pages; pages without a text layer are OCR'd.
+
+    expected_text: phrases printed on this form (from the field map), used to
+    tell an upright scan from an upside-down one.
+    """
     doc = fitz.open(str(path))
     pages = []
     for i in range(min(max_pages, doc.page_count)):
@@ -320,11 +400,9 @@ def load_pdf(path, max_pages: int = 3, dpi: int = 200, ocr_dpi: int = 300,
         # Scanned: render as displayed, then fix orientation and skew and OCR.
         page.set_rotation(file_rot)
         img = _to_bgr(page.get_pixmap(dpi=ocr_dpi))
-        osd_rot = detect_orientation(img)
-        img = rotate(img, osd_rot)
         skew = round(estimate_skew(img), 2)
         img = deskew(img, skew)
-        ocr_words = ocr_page(img)
+        img, ocr_words, osd_rot = _ocr_upright(img, expected_text or [])
         s = ocr_dpi / 72.0
         for w in ocr_words:
             w.x0, w.y0, w.x1, w.y1 = w.x0 / s, w.y0 / s, w.x1 / s, w.y1 / s

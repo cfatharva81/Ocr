@@ -236,7 +236,10 @@ class PageLayout:
                 continue
             for s in starts:
                 best = None
-                for n in range(max(1, k - 1), k + 2):
+                # OCR can glue several printed words into one token
+                # ("Cash orMarketValue"), so windows shorter than the label's
+                # word count have to be tried as well
+                for n in range(1, k + 2):
                     win = words[s:s + n]
                     if len(win) < n or any(id(w) in exclude for w in win):
                         continue
@@ -245,12 +248,19 @@ class PageLayout:
                     text = norm(join(win))
                     if not text:
                         continue
-                    score = fuzz.ratio(target, text)
-                    # Label printed as a prefix of a longer phrase token
-                    # (e.g. OCR glued "Phone(555)") gets partial credit.
-                    if (score < threshold and len(target) >= 8 and len(text) > len(target)
-                            and text.startswith(target)):
-                        score = max(score, 90.0)
+                    # OCR sometimes drops the spaces inside a phrase
+                    # ("LoanApplication"), so also compare without them
+                    score = max(fuzz.ratio(target, text),
+                                fuzz.ratio(target.replace(" ", ""), text.replace(" ", "")))
+                    # The label may be glued to what follows it ("ZIP62701",
+                    # "Phone(555)"). Give that partial credit when the extra
+                    # text looks like a value (contains a digit) or the label
+                    # is long enough for the prefix to be conclusive.
+                    target_ns, text_ns = target.replace(" ", ""), text.replace(" ", "")
+                    if score < threshold and text_ns.startswith(target_ns) and len(text_ns) > len(target_ns):
+                        rest = text_ns[len(target_ns):]
+                        if len(target_ns) >= 8 or any(c.isdigit() for c in rest):
+                            score = max(score, 90.0)
                     # ties go to the longer window so trailing symbols such as
                     # the "$" in "Property Value $" stay part of the label
                     if best is None or score >= best.score:
@@ -283,19 +293,61 @@ class PageLayout:
         if not found:
             return None
         if pick == "first":
-            return min(found, key=lambda m: (round(m.y0), m.x0))
+            # a clearly better match wins; among equally good ones take the
+            # first in reading order
+            best = max(m.score for m in found)
+            return min((m for m in found if m.score >= best - 5), key=lambda m: (round(m.y0), m.x0))
         return max(found, key=lambda m: (m.score, -m.y0, -m.x0))
+
+    def find_label_in_token(self, label: str, scope: Rect | None = None,
+                            threshold: float = 85) -> LabelMatch | None:
+        """Find a label swallowed by a longer OCR token.
+
+        OCR can merge two printed headers into one box
+        ("TobepaidoffatMonthlyPayment"); this locates the label inside such a
+        token and interpolates its box from the character positions.
+        """
+        target = norm(label).replace(" ", "")
+        if len(target) < 6:
+            return None
+        best = None
+        for w in self.page.words:
+            if not contains(scope, w):
+                continue
+            squashed, index = "", []          # squashed text + original char index of each char
+            for i, ch in enumerate(w.text):
+                if norm(ch):
+                    squashed += norm(ch)
+                    index.append(i)
+            if len(squashed) <= len(target):
+                continue
+            a = fuzz.partial_ratio_alignment(target, squashed)
+            if a is None or a.score < threshold:
+                continue
+            if best is None or a.score > best[0].score:
+                start, end = index[a.dest_start], index[min(a.dest_end, len(index) - 1)] + 1
+                per_char = (w.x1 - w.x0) / max(1, len(w.text))
+                piece = Word(w.text[start:end], w.x0 + start * per_char, w.y0,
+                             w.x0 + end * per_char, w.y1, w.conf, w.source)
+                best = (LabelMatch([piece], a.score, label, [piece]),)
+        return best[0] if best else None
 
     # ------------------------------------------------------------ stop labels
 
     def _is_stop(self, words: Sequence[Word], i: int, own: str = "") -> bool:
-        """Does a known label start at words[i]?"""
+        """Does a known label start at words[i]?
+
+        At the start of a value run the test is stricter: OCR glues a value to
+        the label that follows it ("5Years"), and cutting there would throw the
+        value away.
+        """
+        threshold = 95 if i == 0 else 90
         for sl in self.stop_labels:
             if sl == own:
                 continue
             k = len(sl.split())
             text = norm(join(words[i:i + k]))
-            if text and fuzz.ratio(sl, text) >= 90:
+            if text and fuzz.ratio(sl, text) >= threshold:
                 return True
         return False
 
@@ -313,18 +365,64 @@ class PageLayout:
                 return words[:i]
         return words
 
+    def cut_at_stop_text(self, text: str) -> str:
+        """Trim a re-read string where the next printed label starts."""
+        toks = text.split()
+        for i in range(len(toks)):
+            window = norm(" ".join(toks[i:]))
+            for sl in self.stop_labels:
+                k = len(sl.split())
+                if fuzz.ratio(sl, norm(" ".join(toks[i:i + k]))) >= (95 if i == 0 else 90):
+                    return " ".join(toks[:i]).strip()
+            if not window:
+                break
+        return text.strip()
+
     # ------------------------------------------------------------ values
+
+    def _glued_tail(self, lm: LabelMatch) -> Word | None:
+        """Value stuck to its label in one OCR token ("StateIL" -> "IL").
+
+        Returns the remainder as a word, its box interpolated by character width.
+        """
+        w = lm.words[-1]
+        label_ns = norm(lm.label).replace(" ", "")
+        matched_ns = norm(join(lm.words)).replace(" ", "")
+        if len(matched_ns) <= len(label_ns) or not matched_ns.startswith(label_ns):
+            return None
+        extra = len(matched_ns) - len(label_ns)   # characters of the value stuck to the label
+        word_ns = norm(w.text).replace(" ", "")
+        if extra >= len(word_ns):
+            return None
+        keep, cut = len(word_ns) - extra, len(w.text)
+        seen = 0
+        for i, ch in enumerate(w.text):           # walk to where the value starts inside the token
+            if seen == keep:
+                cut = i
+                break
+            if norm(ch):
+                seen += 1
+        tail = w.text[cut:].strip()
+        if not tail:
+            return None
+        per_char = (w.x1 - w.x0) / max(1, len(w.text))
+        return Word(tail, w.x0 + cut * per_char, w.y0, w.x1, w.y1, w.conf, w.source)
 
     def value_right_of(self, lm: LabelMatch, max_width: float = 200,
                        scope: Rect | None = None, max_gap: float | None = None) -> ValueMatch | None:
         """First run of words to the right of the label on the same row."""
-        x_start = lm.x1 - 0.5
+        # word boxes inside one OCR box are interpolated from character counts,
+        # so a value can start a hair left of where the label "ends"
+        x_start = lm.x1 - (4.0 if lm.words[-1].source == "ocr" else 0.5)
         own_ids = {id(w) for w in lm.words}
         cand = [w for w in self.page.words
                 if id(w) not in own_ids and w.x0 >= x_start and w.x0 <= lm.x1 + max_width
                 and v_overlap(w.y0, w.y1, lm.y0, lm.y1) >= 0.45 and contains(scope, w)]
+        glued = self._glued_tail(lm)
         if not cand:
-            return None
+            return ValueMatch([glued]) if glued is not None else None
+        if glued is not None:
+            cand = [glued] + cand
         cand.sort(key=lambda w: w.x0)
         gap = max_gap if max_gap is not None else max(phrase_gap(cand + lm.words) * 2.2, 8.0)
         runs: list[list[Word]] = [[cand[0]]]
