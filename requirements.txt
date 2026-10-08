@@ -4,12 +4,11 @@ rapidocr-onnxruntime>=1.3   # OCR for scanned pages; models ship with the packag
 opencv-python-headless>=4.8
 numpy>=1.26
 pydantic>=2.5
-pyyaml>=6.0
 rapidfuzz>=3.0
 fastapi>=0.110
 uvicorn>=0.27
 python-multipart>=0.0.9
 
-# LLM extraction (cli.py --llm, POST /extract-llm); needs GEMINI_API_KEY
+# Dynamic LLM extraction; needs GEMINI_API_KEY
 google-genai>=1.30
 python-dotenv>=1.0

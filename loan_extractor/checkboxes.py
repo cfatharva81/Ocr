@@ -23,13 +23,14 @@ from .layout import BOX_GLYPHS, LabelMatch, PageLayout, Rect, v_overlap
 
 CHECK_GLYPHS = BOX_GLYPHS - {"☐", "□"}      # empty-box glyphs are not checks
 _GLYPH_PREFIX = re.compile(r"^[\[\(|{]?[xX☒☑■✓✔][\]\)|}]?(?=[A-Za-z])")
+_RADIO_TOKENS = {"o", "⊙", "○", "◯"}
 
 
 @dataclass
 class CheckboxDecision:
     option: str
     checked: bool
-    method: str                      # widget | glyph | opencv | none
+    method: str                      # widget | glyph | opencv | radio | none
     score: float = 1.0               # fill ratio for opencv, 1.0 otherwise
     box_bbox: Rect | None = None     # the checkbox itself (points)
     label_bbox: Rect | None = None
@@ -64,6 +65,10 @@ def _r(b):
 def is_check_glyph(text: str) -> bool:
     t = text.strip().strip("[](){}|").strip()
     return t.lower() in CHECK_GLYPHS
+
+
+def _is_radio_token(text: str) -> bool:
+    return text.strip().strip("[](){}|.,:;").casefold() in _RADIO_TOKENS
 
 
 # ------------------------------------------------------------------ widgets
@@ -190,14 +195,14 @@ def _opencv_left_of(lay: PageLayout, label: LabelMatch, threshold: float, reach:
 def decision_conf(d: CheckboxDecision, scanned: bool, threshold: float = 0.15) -> float:
     """Source confidence of one checkbox decision.
 
-    widget 1.0; glyph 0.95 native / 0.9 OCR; OpenCV 0.75-0.95 depending on how
-    far the fill ratio is from the threshold; 0.3 when no box was located.
+    widget 1.0; glyph 0.95 native / 0.9 OCR; image-based marks 0.75-0.95 depending
+    on how far the fill ratio is from the threshold; 0.3 when no mark was located.
     """
     if d.method == "widget":
         return 1.0
     if d.method == "glyph":
         return 0.9 if scanned else 0.95
-    if d.method == "opencv":
+    if d.method in ("opencv", "radio"):
         margin = min(1.0, abs(d.score - threshold) / max(threshold, 1e-6))
         return 0.75 + 0.2 * margin
     return 0.3
@@ -290,8 +295,116 @@ def side_coverage(lay: PageLayout, box: Rect, strip: float = 0.15) -> float:
                      ink[:, :t].any(1).mean(), ink[:, -t:].any(1).mean()))
 
 
+def _radio_mark(lay: PageLayout, word: Word) -> tuple[Rect, float] | None:
+    """Find a circular bubble near an OCR O-token and measure ink at its center."""
+    if not _is_radio_token(word.text):
+        return None
+    following = [w for w in lay.page.words if w is not word and -2 <= w.x0 - word.x1 <= 36
+                 and v_overlap(w.y0, w.y1, word.y0, word.y1) >= 0.15]
+    if not following:
+        return None
+
+    scale = lay.page.scale
+    image = lay.page.image
+    token_cx, token_cy = (word.x0 + word.x1) / 2, (word.y0 + word.y1) / 2
+    x0, y0 = max(0, int((token_cx - 8) * scale)), max(0, int((token_cy - 8) * scale))
+    x1, y1 = min(image.shape[1], int((token_cx + 8) * scale)), min(image.shape[0], int((token_cy + 8) * scale))
+    crop = image[y0:y1, x0:x1]
+    if crop.size == 0:
+        return None
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+    ink = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    contours, _ = cv2.findContours(ink, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    circles = []
+    for contour in contours:
+        bx, by, bw, bh = cv2.boundingRect(contour)
+        width, height = bw / scale, bh / scale
+        if not (4.0 <= width <= 13.0 and 4.0 <= height <= 13.0 and 0.7 <= width / height <= 1.4):
+            continue
+        perimeter = cv2.arcLength(contour, True)
+        circularity = 4 * np.pi * cv2.contourArea(contour) / (perimeter * perimeter) if perimeter else 0.0
+        center_x, center_y = (x0 + bx + bw / 2) / scale, (y0 + by + bh / 2) / scale
+        distance = ((center_x - token_cx) ** 2 + (center_y - token_cy) ** 2) ** 0.5
+        if circularity >= 0.65 and distance <= 7.0:
+            circles.append((distance, -width * height, center_x, center_y, width, height))
+    if not circles:
+        return None
+
+    _, _, center_x, center_y, width, height = min(circles)
+    radius = max(1.0, min(width, height) * 0.2)
+    px, py = round(center_x * scale) - x0, round(center_y * scale) - y0
+    radius_px = round(radius * scale)
+    center = gray[max(0, py - radius_px):min(gray.shape[0], py + radius_px + 1),
+                  max(0, px - radius_px):min(gray.shape[1], px + radius_px + 1)]
+    if center.size == 0:
+        return None
+    fill = float((center < 100).mean())
+    box = (center_x - width / 2, center_y - height / 2,
+           center_x + width / 2, center_y + height / 2)
+    return box, fill
+
+
 def _overlaps(a: Rect, b: Rect) -> bool:
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def _radio_contours(lay: PageLayout, existing: list[CheckboxDecision]) -> list[CheckboxDecision]:
+    """Find aligned radio bubbles in the page image, including bubbles OCR merged into text."""
+    page = lay.page
+    scale = page.scale
+    gray = cv2.cvtColor(page.image, cv2.COLOR_BGR2GRAY) if page.image.ndim == 3 else page.image
+    binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    candidates = []
+    for contour in contours:
+        x, y, width_px, height_px = cv2.boundingRect(contour)
+        width, height = width_px / scale, height_px / scale
+        if not (6.0 <= width <= 9.0 and 6.0 <= height <= 9.0 and 0.8 <= width / height <= 1.25):
+            continue
+        perimeter = cv2.arcLength(contour, True)
+        circularity = 4 * np.pi * cv2.contourArea(contour) / (perimeter * perimeter) if perimeter else 0.0
+        if circularity < 0.65:
+            continue
+        box = (x / scale, y / scale, (x + width_px) / scale, (y + height_px) / scale)
+        center = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+        area = width * height
+        candidates.append((area, center, box))
+
+    candidates.sort(key=lambda item: -item[0])
+    unique = []
+    for candidate in candidates:
+        if any(((candidate[1][0] - other[1][0]) ** 2 + (candidate[1][1] - other[1][1]) ** 2) ** 0.5 < 1.5
+               for other in unique):
+            continue
+        unique.append(candidate)
+
+    radios = []
+    for _, (cx, cy), box in unique:
+        vertical_group = any(abs(other[1][0] - cx) <= 2.5 and 8.0 <= abs(other[1][1] - cy) <= 35.0
+                             for other in unique if other[1] != (cx, cy))
+        horizontal_group = any(abs(other[1][1] - cy) <= 2.5 and 8.0 <= abs(other[1][0] - cx) <= 90.0
+                               for other in unique if other[1] != (cx, cy))
+        text_nearby = any(
+            -6.0 <= word.x0 - box[2] <= 36.0
+            and v_overlap(word.y0, word.y1, box[1], box[3]) >= 0.25
+            for word in page.words
+        )
+        if not vertical_group and not (horizontal_group and text_nearby):
+            continue
+        if any(d.method != "radio" and d.box_bbox and _overlaps(box, d.box_bbox) for d in existing):
+            continue
+        if any(d.method == "radio" and d.box_bbox and _overlaps(box, d.box_bbox) for d in existing + radios):
+            continue
+
+        radius = max(1.0, min(box[2] - box[0], box[3] - box[1]) * 0.2)
+        px, py, radius_px = round(cx * scale), round(cy * scale), round(radius * scale)
+        center = gray[max(0, py - radius_px):min(gray.shape[0], py + radius_px + 1),
+                      max(0, px - radius_px):min(gray.shape[1], px + radius_px + 1)]
+        if center.size == 0:
+            continue
+        fill = float((center < 100).mean())
+        radios.append(CheckboxDecision("", fill >= 0.15, "radio", round(fill, 3), box))
+    return radios
 
 
 # What OCR makes of a box outline or the tick in it; never real letters, except a lone X.
@@ -315,6 +428,14 @@ def page_checkboxes(lay: PageLayout, threshold: float = 0.15, min_side: float = 
             continue
         ratio = fill_ratio(lay, b)
         out.append(CheckboxDecision("", ratio >= threshold, "opencv", round(ratio, 3), b))
+    for word in lay.page.words:
+        if any(d.box_bbox and _overlaps(word.bbox, d.box_bbox) for d in out):
+            continue
+        radio = _radio_mark(lay, word)
+        if radio is not None:
+            box, ratio = radio
+            out.append(CheckboxDecision("", ratio >= threshold, "radio", round(ratio, 3), box))
+    out.extend(_radio_contours(lay, out))
     return out
 
 
@@ -327,12 +448,37 @@ def words_with_marks(lay: PageLayout, decisions: list[CheckboxDecision]) -> list
     inside a box, is the box itself and is dropped. A check glyph with no box around it
     ("X", "☒", "✓") becomes "[X]".
     """
-    boxes = [d.box_bbox for d in decisions]
+    boxes = [(d.box_bbox, d.method) for d in decisions if d.box_bbox is not None]
     out = []
     for w in lay.page.words:
-        box = next((b for b in boxes if w.x0 < b[2] - 1 and b[0] < w.x1
-                    and abs(w.cy - (b[1] + b[3]) / 2) <= (b[3] - b[1]) / 2), None)
-        if box is not None:
+        match = next(((b, method) for b, method in boxes if w.x0 < b[2] - 1 and b[0] < w.x1
+                      and abs(w.cy - (b[1] + b[3]) / 2) <= (b[3] - b[1]) / 2), None)
+        if match is not None:
+            box, method = match
+            if method == "radio" and _is_radio_token(w.text):
+                continue
+            if method == "radio":
+                token = w.text
+                width = w.x1 - w.x0
+                glyph_indices = [i for i, char in enumerate(token) if char in "Oo0⊙○◯"]
+                if width > 0 and glyph_indices:
+                    bubble_cx = (box[0] + box[2]) / 2
+                    target = (bubble_cx - w.x0) / width * len(token) - 0.5
+                    index = min(glyph_indices, key=lambda i: abs(i - target))
+                    if abs(index - target) <= 1.0:
+                        left_text, right_text = token[:index], token[index + 1:]
+                        left_x = w.x0 + width * index / len(token)
+                        right_x = w.x0 + width * (index + 1) / len(token)
+                        if left_text and right_text:
+                            out.append(replace(w, text=left_text, x1=left_x))
+                            out.append(replace(w, text=right_text, x0=right_x))
+                        elif left_text:
+                            out.append(replace(w, text=left_text, x1=min(w.x1, box[0] - 0.1)))
+                        elif right_text:
+                            out.append(replace(w, text=right_text, x0=max(w.x0, box[2] + 0.1)))
+                        continue
+                out.append(replace(w, x0=max(w.x0, box[2] + 0.1)))
+                continue
             m = _GLYPH_PREFIX.match(w.text)
             text = w.text[m.end():] if m else w.text.lstrip("".join(_BOX_JUNK) + " ")
             if not text or (is_check_glyph(text) and w.cx <= box[2]):

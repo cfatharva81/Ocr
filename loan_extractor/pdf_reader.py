@@ -344,32 +344,21 @@ def text_match_score(words: list[Word], expected: list[str]) -> float:
 
 # --------------------------------------------------------------------- entry point
 
-def _ocr_upright(img: np.ndarray, expected: list[str]) -> tuple[np.ndarray, list[Word], int]:
+def _ocr_upright(img: np.ndarray) -> tuple[np.ndarray, list[Word], int]:
     """OCR a page image, turning it upright first. Returns (image, words, rotation applied).
 
-    Sideways pages are spotted from the image itself; whether the result is
-    then upright or upside down is decided by how much of the expected form
-    text was actually read, re-reading the flipped image only when needed.
+    Sideways pages are spotted from the image itself.
     """
     rot = 90 if is_sideways(img) else 0
     img = rotate(img, rot)
     words = ocr_page(img)
-    if expected and text_match_score(words, expected) < 0.25:
-        flipped = rotate(img, 180)
-        alt = ocr_page(flipped)
-        if text_match_score(alt, expected) > text_match_score(words, expected):
-            log.info("page was upside down: rotated 180")
-            return flipped, alt, (rot + 180) % 360
     return img, words, rot
 
 
 def load_pdf(path, max_pages: int = 3, dpi: int = 200, ocr_dpi: int = 300,
-             force_ocr: bool = False, min_native_words: int = 25,
-             expected_text: list[str] | None = None) -> list[Page]:
+             force_ocr: bool = False, min_native_words: int = 25) -> list[Page]:
     """Load the first pages as upright Pages; pages without a text layer are OCR'd.
 
-    expected_text: phrases printed on this form (from the field map), used to
-    tell an upright scan from an upside-down one.
     """
     doc = fitz.open(str(path))
     pages = []
@@ -402,7 +391,7 @@ def load_pdf(path, max_pages: int = 3, dpi: int = 200, ocr_dpi: int = 300,
         img = _to_bgr(page.get_pixmap(dpi=ocr_dpi))
         skew = round(estimate_skew(img), 2)
         img = deskew(img, skew)
-        img, ocr_words, osd_rot = _ocr_upright(img, expected_text or [])
+        img, ocr_words, osd_rot = _ocr_upright(img)
         s = ocr_dpi / 72.0
         for w in ocr_words:
             w.x0, w.y0, w.x1, w.y1 = w.x0 / s, w.y0 / s, w.x1 / s, w.y1 / s

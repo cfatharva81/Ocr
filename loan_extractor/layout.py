@@ -248,8 +248,7 @@ class PageLayout:
                     text = norm(join(win))
                     if not text:
                         continue
-                    # OCR sometimes drops the spaces inside a phrase
-                    # ("LoanApplication"), so also compare without them
+                    # OCR sometimes drops spaces inside a phrase, so also compare without them.
                     score = max(fuzz.ratio(target, text),
                                 fuzz.ratio(target.replace(" ", ""), text.replace(" ", "")))
                     # The label may be glued to what follows it ("ZIP62701",

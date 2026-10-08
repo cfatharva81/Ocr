@@ -1,4 +1,4 @@
-"""Value normalizers: currency, dates, phone, SSN, ZIP, state codes, ints, booleans.
+"""Value normalizers for dynamic document fields.
 
 All functions accept messy strings (including common OCR confusions such as
 O/0, l/1, S/$) and return None when nothing usable is found, never raise.
@@ -7,24 +7,6 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
-
-from rapidfuzz import fuzz, process
-
-US_STATES = {
-    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California",
-    "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware", "DC": "District of Columbia",
-    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho", "IL": "Illinois",
-    "IN": "Indiana", "IA": "Iowa", "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana",
-    "ME": "Maine", "MD": "Maryland", "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota",
-    "MS": "Mississippi", "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
-    "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
-    "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma", "OR": "Oregon",
-    "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina", "SD": "South Dakota",
-    "TN": "Tennessee", "TX": "Texas", "UT": "Utah", "VT": "Vermont", "VA": "Virginia",
-    "WA": "Washington", "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
-    "PR": "Puerto Rico", "GU": "Guam", "VI": "Virgin Islands",
-}
-_NAME_TO_CODE = {v.lower(): k for k, v in US_STATES.items()}
 
 # OCR confusions that only make sense inside numeric tokens.
 _DIGIT_FIX = str.maketrans({"O": "0", "o": "0", "D": "0", "Q": "0", "l": "1", "I": "1", "|": "1",
@@ -128,47 +110,6 @@ def phone(s) -> str | None:
     return digits if len(digits) >= 7 else None
 
 
-def ssn(s) -> str | None:
-    """'123 45 6789' / '123456789' -> '123-45-6789'. None unless exactly 9 digits."""
-    if s is None:
-        return None
-    t = _numeric_token(str(s))
-    m = re.search(r"(\d{3})\D{0,2}(\d{2})\D{0,2}(\d{4})", t)
-    if not m:
-        return None
-    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-
-
-def zip_code(s) -> str | None:
-    if s is None:
-        return None
-    t = _numeric_token(str(s))
-    m = re.search(r"\b(\d{5})(?:\s*-\s*(\d{4}))?\b", t)
-    if not m:
-        return None
-    return f"{m.group(1)}-{m.group(2)}" if m.group(2) else m.group(1)
-
-
-def state_code(s) -> str | None:
-    """'IL', 'il', 'Illinois', 'Ilinois' -> 'IL'."""
-    t = clean_text(s)
-    if not t:
-        return None
-    up = re.sub(r"[^A-Za-z ]", "", t).strip().upper()
-    if up in US_STATES:
-        return up
-    low = up.lower()
-    if low in _NAME_TO_CODE:
-        return _NAME_TO_CODE[low]
-    # OCR: '1L' -> 'IL' etc.
-    alt = t.upper().replace("1", "I").replace("0", "O").replace("5", "S")
-    alt = re.sub(r"[^A-Z]", "", alt)
-    if alt in US_STATES:
-        return alt
-    hit = process.extractOne(low, list(_NAME_TO_CODE), scorer=fuzz.ratio, score_cutoff=85)
-    return _NAME_TO_CODE[hit[0]] if hit else None
-
-
 def integer(s) -> int | None:
     if s is None:
         return None
@@ -208,15 +149,6 @@ def boolean(s) -> bool | None:
     return None
 
 
-def account_number(s) -> str | None:
-    """Keep alphanumerics and dashes; fix O/0 and l/1 when mostly digits."""
-    t = clean_text(s)
-    if not t:
-        return None
-    t = t.replace(" ", "")
-    return _numeric_token(t) if re.search(r"\d", t) else t
-
-
 def email(s) -> str | None:
     t = clean_text(s)
     if not t:
@@ -225,17 +157,6 @@ def email(s) -> str | None:
     t = re.sub(r"\(at\)|\[at\]", "@", t)
     m = re.search(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", t)
     return m.group(0) if m else t
-
-
-def comparable(v) -> str:
-    """Canonical string for comparing values (benchmark/tests)."""
-    if v is None:
-        return ""
-    if isinstance(v, bool):
-        return str(v).lower()
-    if isinstance(v, float):
-        return f"{v:.2f}"
-    return re.sub(r"\s+", " ", str(v)).strip().casefold()
 
 
 # ------------------------------------------------------------------ masking

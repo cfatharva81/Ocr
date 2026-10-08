@@ -3,18 +3,17 @@
 Gemini's structured output needs a fixed schema, so the schema is generic instead of
 form-specific: a document is sections of key/label/value fields plus tables. The model
 picks the keys and a value_type; `normalized` then turns the printed value into a typed
-one with the same normalizers the rule-based extractor uses.
+one with shared value normalizers.
 
-Auto mode's keys can change from run to run. DynamicDocument.to_template() freezes one
-result's structure (keys, labels, types; no values) as a Template; template_model() turns
-that into a Pydantic model with exactly those keys, so later runs fill the same structure.
+The model chooses keys and value types for each document, so the schema can change from
+one extraction to the next.
 """
 from __future__ import annotations
 
 import re
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, create_model, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 from . import normalizers as N
 
@@ -129,106 +128,3 @@ class DynamicDocument(_Base):
                 sec[fresh(names, t.key)] = t.records()
             out[fresh(taken, s.key)] = sec
         return out
-
-    def to_template(self) -> "Template":
-        """This result's structure without its values; keys match to_nested()."""
-        taken, sections = {"document_type"}, []
-        for s in self.sections:
-            names: set[str] = set()
-            fields = [TemplateField(key=fresh(names, f.key), label=f.label, value_type=f.value_type)
-                      for f in s.fields]
-            tables = [TemplateTable(key=fresh(names, t.key), title=t.title,
-                                    columns=[TemplateColumn(key=c, value_type=ct)
-                                             for c, ct in zip(t.columns, t.column_types)])
-                      for t in s.tables]
-            sections.append(TemplateSection(key=fresh(taken, s.key), title=s.title, fields=fields, tables=tables))
-        return Template(document_type=self.document_type, sections=sections)
-
-
-# ====================================================================== templates
-# A template is plain JSON, so it can be reviewed and edited by hand: rename a key,
-# drop a field, fix a value_type.
-
-class TemplateField(_Base):
-    key: str
-    label: str
-    value_type: ValueType = "text"
-
-
-class TemplateColumn(_Base):
-    key: str
-    value_type: ValueType = "text"
-
-
-class TemplateTable(_Base):
-    key: str
-    title: Optional[str] = None
-    columns: list[TemplateColumn]
-
-
-class TemplateSection(_Base):
-    key: str
-    title: Optional[str] = None
-    fields: list[TemplateField] = Field(default_factory=list)
-    tables: list[TemplateTable] = Field(default_factory=list)
-
-
-class Template(_Base):
-    template_version: int = 1
-    document_type: str
-    sections: list[TemplateSection]
-
-    @model_validator(mode="after")
-    def _unique_keys(self):
-        """Keys must be snake_case and unique where they share a JSON object."""
-        def check(keys: list[str], where: str):
-            bad = [k for k in keys if snake(k) != k]
-            if bad:
-                raise ValueError(f"{where}: keys must be snake_case: {bad}")
-            dup = {k for k in keys if keys.count(k) > 1}
-            if dup:
-                raise ValueError(f"{where}: duplicate keys {sorted(dup)}")
-        check(["document_type"] + [s.key for s in self.sections], "sections")
-        for s in self.sections:
-            check([f.key for f in s.fields] + [t.key for t in s.tables], s.key)
-            for t in s.tables:
-                check([c.key for c in t.columns], f"{s.key}.{t.key}")
-        return self
-
-
-_FILL_CONFIG = ConfigDict(extra="forbid", str_strip_whitespace=True, populate_by_name=True)
-
-
-def template_model(tpl: Template) -> type[BaseModel]:
-    """A Pydantic model with exactly the template's keys; every value is the printed text or null.
-
-    Keys become aliases (python names f0, f1 ...), so any key works, even "copy" or "1a".
-    Each field's description carries its printed label and value type for the LLM.
-    """
-    def model(name: str, items: list[tuple[str, Any, str]]) -> type[BaseModel]:
-        return create_model(name, __config__=_FILL_CONFIG, **{
-            f"f{i}": (ann, Field(..., alias=key, description=desc)) for i, (key, ann, desc) in enumerate(items)})
-
-    sections = []
-    for si, s in enumerate(tpl.sections):
-        items: list[tuple[str, Any, str]] = [
-            (f.key, Optional[str], f'printed label "{f.label}"; {f.value_type}') for f in s.fields]
-        for ti, t in enumerate(s.tables):
-            row = model(f"S{si}T{ti}_{t.key}", [(c.key, Optional[str], c.value_type) for c in t.columns])
-            title = f' "{t.title}"' if t.title else ""
-            items.append((t.key, list[row], f"table{title}: one item per filled-in row"))
-        desc = f'section "{s.title}"' if s.title else f"section {s.key}"
-        sections.append((s.key, model(f"S{si}_{s.key}", items), desc))
-    return model("FilledTemplate", sections)
-
-
-def fill_template(tpl: Template, filled: BaseModel) -> dict:
-    """The filled model as {document_type, <section>: {<field>: value, <table>: [rows]}}, values typed."""
-    data = filled.model_dump(by_alias=True)
-    out: dict = {"document_type": tpl.document_type}
-    for s in tpl.sections:
-        sec = data[s.key]
-        out[s.key] = {f.key: normalize(sec[f.key], f.value_type) for f in s.fields}
-        for t in s.tables:
-            out[s.key][t.key] = [{c.key: normalize(r[c.key], c.value_type) for c in t.columns} for r in sec[t.key]]
-    return out
